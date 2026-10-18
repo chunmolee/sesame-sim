@@ -43,6 +43,52 @@ uv sync --extra playground-cuda --extra dev
 OpenPI and GR00T should each have their own vendor environment or container. Their JAX,
 PyTorch, CUDA and LeRobot versions are not expected to coexist with one another.
 
+### Local reconstruction and CPU-only PPO
+
+This checkout includes a reconstructed `src/sesame_ml/envs/core.py`: that file was
+absent from upstream, whose `core.*` crash-dump ignore pattern also matched Python
+source. The local `.gitignore` explicitly allows the module.
+This is not a recovery of the author's unpublished implementation; historical
+evaluation reports are not directly comparable to runs with the reconstructed rewards.
+
+For a Linux CPU-only environment without installing CUDA packages:
+
+```bash
+uv venv --python 3.11
+uv sync --extra video
+uv pip install --python .venv/bin/python 'torch>=2.7,<3' \
+  --index-url https://download.pytorch.org/whl/cpu
+uv pip install --python .venv/bin/python -e '.[train,video,dev]'
+uv run --no-sync sesame-ml validate-model --seconds 5
+MUJOCO_GL=egl uv run --no-sync pytest -q
+```
+
+`--no-sync` preserves this explicitly installed CPU dependency set rather than
+resynchronizing it with the project lock. EGL is for Linux offscreen rendering;
+it still requires a working EGL driver and is unnecessary for state-only training.
+Leave `MUJOCO_GL` unset for the native desktop viewer. JAX/MJX tests are skipped
+unless their separate optional dependencies are installed.
+
+Exercise real PPO updates, periodic evaluation and checkpoint saving before a long run:
+
+```bash
+OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 uv run --no-sync sesame-ml train-ppo \
+  --env SesameLocomotion-v0 --steps 4096 --num-envs 2 \
+  --vector-backend dummy --device cpu --rollout-steps 256 --batch-size 128 \
+  --evaluation-frequency 1024 --evaluation-episodes 1 \
+  --checkpoint-frequency 2048 --output runs/local-rebuild-smoke
+
+MUJOCO_GL=egl uv run --no-sync sesame-ml evaluate \
+  --env SesameLocomotion-v0 --policy ppo \
+  --checkpoint runs/local-rebuild-smoke/best/best_model.zip \
+  --vecnormalize runs/local-rebuild-smoke/best/vecnormalize.pkl \
+  --episodes 3 --videos 1 --output artifacts/local-rebuild-ppo-eval
+```
+
+Use a fresh output directory for another run. A completed short run proves the
+training/save/load/evaluation pipeline, not successful locomotion or hardware safety.
+
+
 ## Validate the model
 
 ```bash
@@ -110,6 +156,41 @@ uv run sesame-ml evaluate \
   --videos 3 \
   --output artifacts/locomotion-final
 ```
+
+### Watch multiple robots train in one window
+
+The standing task supports a live native desktop window showing all training workers
+on a shared display floor. This renders their actual simulator states, not a checkpoint
+replay or separate evaluation policy:
+
+```bash
+OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 uv run --no-sync sesame-ml train-ppo \
+  --env SesameStand-v0 --steps 2000000 --num-envs 8 \
+  --vector-backend subproc --device cpu \
+  --rollout-steps 256 --batch-size 512 \
+  --visualize --visualize-realtime \
+  --output runs/stand-live
+```
+
+- `--visualize` opens one window, with a labeled robot for each worker.
+- `--visualization-fps 20` caps display refresh and snapshot transfers, not training.
+- `--visualize-realtime` paces each environment's collection at 50 Hz so motion is
+  readable. Omit it for faster sampling; frames then skip over intermediate states.
+- Drag the left mouse button to rotate; use the scroll wheel to zoom.
+- Close the window or press Esc to stop learning and save the final model plus
+  normalization state. Ctrl+C retains the existing interrupted-checkpoint behavior.
+
+The view is currently supported only for `SesameStand-v0`. Workers remain independent:
+the grid offsets are for display, not shared physics or inter-robot collisions.
+The standing task starts upright and learns to maintain balance, not to recover from a fall.
+PPO optimization and periodic evaluation run between collection callbacks, so the image
+can briefly pause during those phases. Rendering and realtime pacing reduce throughput.
+
+Run this from a working local desktop session (GLFW/OpenGL; on Linux, `DISPLAY` must
+identify an accessible desktop). Plain SSH without a display cannot open the window.
+Do not prefix this native-view command with the offscreen `MUJOCO_GL=egl` setting.
+Use a fresh output directory when starting another run.
+
 
 ## Exercise remote inference safely
 
