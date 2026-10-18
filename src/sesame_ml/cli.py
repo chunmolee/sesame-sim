@@ -226,6 +226,9 @@ def command_train_ppo(args: argparse.Namespace) -> int:
         evaluation_frequency=args.evaluation_frequency,
         evaluation_episodes=args.evaluation_episodes,
         progress_bar=args.progress,
+        visualize=args.visualize,
+        visualization_fps=args.visualization_fps,
+        visualize_realtime=args.visualize_realtime,
     )
     result = train_ppo(config)
     _print_json(result)
@@ -397,9 +400,9 @@ class _ResidualPolicyServerBridge:
         quaternion = np.asarray(observation.imu_quaternion or (1, 0, 0, 0), dtype=np.float64)
         up = _quat_matrix(quaternion).T @ np.asarray([0.0, 0.0, 1.0])
         gyro = np.asarray(observation.imu_gyro or (0, 0, 0), dtype=np.float64)
-        acceleration = np.asarray(
-            observation.imu_acceleration or (0, 0, 9.81), dtype=np.float64
-        ) / 9.81
+        acceleration = (
+            np.asarray(observation.imu_acceleration or (0, 0, 9.81), dtype=np.float64) / 9.81
+        )
         joints = np.asarray(observation.joint_position, dtype=np.float64)
         command = np.asarray(observation.command_velocity or (0, 0, 0), dtype=np.float64)
         last_action = self._last_action.setdefault(observation.robot_id, np.zeros(8))
@@ -423,9 +426,10 @@ class _ResidualPolicyServerBridge:
                 rgb = _decode_jpeg(observation.image_jpeg)
                 if rgb is None:
                     raise ValueError("pixel policy requires a camera JPEG")
-                if self._expected_camera_size is not None and (
-                    rgb.shape[1], rgb.shape[0]
-                ) != self._expected_camera_size:
+                if (
+                    self._expected_camera_size is not None
+                    and (rgb.shape[1], rgb.shape[0]) != self._expected_camera_size
+                ):
                     rgb = np.asarray(
                         Image.fromarray(rgb).resize(
                             self._expected_camera_size, Image.Resampling.BILINEAR
@@ -484,8 +488,10 @@ async def _serve(args: argparse.Namespace) -> None:
         callback = _ResidualPolicyServerBridge(
             policy, chunk_steps=args.chunk_steps, pixels=args.pixels
         )
+
         def close() -> None:
             _close_policy(policy)
+
     server = PolicyWebSocketServer(callback, host=args.host, port=args.port)
     print(f"Sesame policy server listening on ws://{args.host}:{args.port}", flush=True)
     try:
@@ -561,9 +567,7 @@ def command_orange_client(args: argparse.Namespace) -> int:
 
     calibration = ServoCalibration.from_yaml(args.calibration)
     camera_device: int | str = int(args.camera) if args.camera.isdigit() else args.camera
-    camera = V4L2Camera(
-        camera_device, width=args.camera_width, height=args.camera_height, fps=15
-    )
+    camera = V4L2Camera(camera_device, width=args.camera_width, height=args.camera_height, fps=15)
     servos = PCA9685ServoController.open(
         args.i2c_bus, address=int(args.pca9685_address, 0), calibration=calibration
     )
@@ -722,9 +726,7 @@ def _add_eval_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--output", default="artifacts/evaluation")
     parser.add_argument("--videos", type=int, default=0)
-    parser.add_argument(
-        "--video-view", choices=("external", "front", "split"), default="external"
-    )
+    parser.add_argument("--video-view", choices=("external", "front", "split"), default="external")
     parser.add_argument("--observation-mode", choices=("state", "pixels"), default="state")
     parser.add_argument("--no-randomization", action="store_true")
 
@@ -743,9 +745,7 @@ def build_parser() -> argparse.ArgumentParser:
     rollout.set_defaults(handler=command_rollout)
 
     evaluate = subparsers.add_parser("evaluate", help="run a multi-task, multi-seed benchmark")
-    evaluate.add_argument(
-        "--env", choices=tuple(ENVIRONMENT_IDS), action="append", default=None
-    )
+    evaluate.add_argument("--env", choices=tuple(ENVIRONMENT_IDS), action="append", default=None)
     _add_eval_arguments(evaluate)
     evaluate.set_defaults(handler=command_evaluate)
 
@@ -768,6 +768,22 @@ def build_parser() -> argparse.ArgumentParser:
     train.add_argument("--evaluation-frequency", type=int, default=100_000)
     train.add_argument("--evaluation-episodes", type=int, default=10)
     train.add_argument("--progress", action="store_true")
+    train.add_argument(
+        "--visualize",
+        action="store_true",
+        help="show all live standing-training environments in one desktop window",
+    )
+    train.add_argument(
+        "--visualization-fps",
+        type=float,
+        default=20.0,
+        help="maximum live-view refresh rate (does not limit training speed)",
+    )
+    train.add_argument(
+        "--visualize-realtime",
+        action="store_true",
+        help="pace collection at 50 Hz for readable motion; requires --visualize",
+    )
     train.set_defaults(handler=command_train_ppo)
 
     mjx = subparsers.add_parser("train-mjx", help="train Playground/Brax PPO on JAX or CUDA")

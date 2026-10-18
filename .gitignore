@@ -46,6 +46,7 @@ tb_logs/
 jax_cache/
 core
 core.*
+!src/sesame_ml/envs/core.py
 
 # Local configuration and secrets
 .env

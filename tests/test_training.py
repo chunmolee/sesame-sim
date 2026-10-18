@@ -54,11 +54,25 @@ def test_ppo_training_checkpoints_and_resume(tmp_path) -> None:
             total_timesteps=8,
             # Exercise automatic pairing with CheckpointCallback's step-specific
             # sesame_ppo_vecnormalize_16_steps.pkl artifact.
-            resume_from=(
-                first.run_directory / "checkpoints" / "sesame_ppo_16_steps.zip"
-            ),
+            resume_from=(first.run_directory / "checkpoints" / "sesame_ppo_16_steps.zip"),
         )
     )
     assert resumed.resumed
     assert resumed.samples_seen == first.samples_seen + 8
     assert resumed.final_checkpoint.exists()
+
+
+@pytest.mark.parametrize(
+    "updates",
+    [
+        {"visualization_fps": 0},
+        {"visualization_fps": -1},
+        {"visualization_fps": float("nan")},
+        {"visualization_fps": float("inf")},
+        {"visualize": True, "task": "locomotion"},
+        {"visualize_realtime": True},
+    ],
+)
+def test_live_view_rejects_invalid_rates_and_unsupported_modes(updates) -> None:
+    with pytest.raises(ValueError):
+        PPOConfig(**updates)

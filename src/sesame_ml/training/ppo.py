@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import random
 import re
 import signal
 import sys
+import time
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -15,6 +17,7 @@ from typing import Any, Literal
 
 import numpy as np
 
+from sesame_ml.constants import CONTROL_DT
 from sesame_ml.envs import SesameEnv, SesameEnvConfig, Task
 
 VectorBackend = Literal["auto", "dummy", "subproc"]
@@ -67,6 +70,9 @@ class PPOConfig:
     log_interval: int = 1
     progress_bar: bool = False
     verbose: int = 1
+    visualize: bool = False
+    visualization_fps: float = 20.0
+    visualize_realtime: bool = False
 
     def __post_init__(self) -> None:
         task = Task(self.task)
@@ -101,6 +107,12 @@ class PPOConfig:
             raise ValueError("observation_mode must be 'state' or 'pixels'")
         if self.maximum_episode_steps is not None and self.maximum_episode_steps <= 0:
             raise ValueError("maximum_episode_steps must be positive when supplied")
+        if not math.isfinite(self.visualization_fps) or self.visualization_fps <= 0:
+            raise ValueError("visualization_fps must be finite and positive")
+        if self.visualize and task is not Task.STAND:
+            raise ValueError("visualize is only supported for the stand task")
+        if self.visualize_realtime and not self.visualize:
+            raise ValueError("visualize_realtime requires visualize")
 
 
 @dataclass(frozen=True)
@@ -131,9 +143,7 @@ def _optional_sb3() -> dict[str, Any]:
             VecTransposeImage,
         )
     except ImportError as error:  # pragma: no cover - optional dependency path
-        raise ImportError(
-            "PPO training requires `pip install sesame-ml[train]`"
-        ) from error
+        raise ImportError("PPO training requires `pip install sesame-ml[train]`") from error
     return {
         "PPO": PPO,
         "BaseCallback": BaseCallback,
@@ -166,9 +176,7 @@ def seed_everything(seed: int) -> None:
         pass
 
 
-def _environment_factory(
-    config: PPOConfig, *, worker_index: int, evaluation: bool
-) -> Any:
+def _environment_factory(config: PPOConfig, *, worker_index: int, evaluation: bool) -> Any:
     seed = config.seed + (100_000 if evaluation else 0) + worker_index
 
     def make() -> SesameEnv:
@@ -214,9 +222,7 @@ def make_vector_environment(
         start_method = config.subproc_start_method
         if start_method is None:
             start_method = "forkserver" if sys.platform.startswith("linux") else "spawn"
-        vector_environment = dependencies["SubprocVecEnv"](
-            factories, start_method=start_method
-        )
+        vector_environment = dependencies["SubprocVecEnv"](factories, start_method=start_method)
     else:
         vector_environment = dependencies["DummyVecEnv"](factories)
     vector_environment.seed(config.seed + (100_000 if evaluation else 0))
@@ -456,7 +462,53 @@ def train_ppo(config: PPOConfig) -> TrainingResult:
         render=False,
         verbose=config.verbose,
     )
-    callbacks = dependencies["CallbackList"]([checkpoint_callback, evaluation_callback])
+    viewer = None
+    if config.visualize:
+        # Import the window backend (GLFW) only when visualization is
+        # requested, so headless training is unaffected.
+        try:
+            from sesame_ml.training.viewer import TrainingViewer
+
+            viewer = TrainingViewer(
+                config.number_of_environments, frames_per_second=config.visualization_fps
+            )
+        except BaseException:
+            evaluation_environment.close()
+            training_environment.close()
+            raise
+
+        class TrainingViewerCallback(dependencies["BaseCallback"]):  # type: ignore[misc, valid-type]
+            """Updates the window from real training state at each vector step.
+
+            Learning stops when the window is closed.
+            """
+
+            def __init__(self) -> None:
+                super().__init__(verbose=0)
+                self._deadline: float | None = None
+
+            def _on_step(self) -> bool:
+                if viewer.ready():
+                    poses = self.training_env.env_method("training_view_state")
+                    if not viewer.update(poses, samples_seen=int(self.num_timesteps)):
+                        return False
+                if config.visualize_realtime:
+                    # Throttle to the control rate (50 Hz) with a monotonic-clock
+                    # deadline. Delays from PPO updates or evaluation are not
+                    # made up, so playback does not burst afterwards.
+                    now = time.monotonic()
+                    deadline = (now if self._deadline is None else self._deadline) + CONTROL_DT
+                    if deadline > now:
+                        time.sleep(deadline - now)
+                    else:
+                        deadline = now
+                    self._deadline = deadline
+                return True
+
+        callback_list = [checkpoint_callback, evaluation_callback, TrainingViewerCallback()]
+    else:
+        callback_list = [checkpoint_callback, evaluation_callback]
+    callbacks = dependencies["CallbackList"](callback_list)
 
     previous_sigterm = signal.getsignal(signal.SIGTERM)
     interrupted = False
@@ -513,16 +565,21 @@ def train_ppo(config: PPOConfig) -> TrainingResult:
     finally:
         if installed_signal:
             signal.signal(signal.SIGTERM, previous_sigterm)
-        if interrupted or failed:
-            evaluation_environment.close()
-            training_environment.close()
+        try:
+            if viewer is not None:
+                viewer.close()
+        except BaseException:
+            failed = True
+            raise
+        finally:
+            if interrupted or failed:
+                evaluation_environment.close()
+                training_environment.close()
 
     final_checkpoint = run_directory / "final_model"
     model.save(str(final_checkpoint))
     final_checkpoint = final_checkpoint.with_suffix(".zip")
-    normalizer_path = _save_normalizer(
-        training_environment, run_directory / "vecnormalize.pkl"
-    )
+    normalizer_path = _save_normalizer(training_environment, run_directory / "vecnormalize.pkl")
     best_checkpoint = best_directory / "best_model.zip"
     if not best_checkpoint.exists():
         best_checkpoint = None

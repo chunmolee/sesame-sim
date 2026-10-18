@@ -36,6 +36,34 @@ Nominal upright resets settle their initial contact transient before the episode
 Recovery resets are instead lifted clear of floor penetration and left in a deliberately
 challenging orientation.
 
+### Reconstructed native environment
+
+The local native `envs/core.py` is reconstructed, not the missing upstream original.
+It uses the published 43-value state schema and the existing model and constants.
+Command observations are divided by `[0.25, 0.25, 1.4]`, matching the deployed CLI
+bridge; the MJX actor retains its separate 20-value schema.
+
+Default limits are 500 stand, 600 recovery, 1000 locomotion and 1500 navigation
+control steps. Recovery terminates successfully after 0.5 seconds continuously
+above 0.035 m, with upright greater than 0.9 and angular speed below 0.5 rad/s.
+Navigation terminates at the goal or outside the arena. Other physical falls
+terminate below 0.023 m or upright below 0.15; recovery permits the initial tilt.
+
+Native reward rates use the existing MJX weights for upright (0.5), pose (0.25),
+linear tracking (1.5), yaw tracking (0.55), power (-0.003) and action changes
+(-0.025), integrated over the control period. Recovery adds a height reward;
+navigation adds goal progress and an obstacle-contact penalty. Falls/bounds
+violations cost 2 and reaching/recovering earns 2. These reconstructed rewards
+are not numerically comparable with the historical committed reports.
+
+Every locomotion episode starts with a nonzero forward/backward command of at
+least 0.08 m/s, rather than allowing an initial near-zero command to certify
+standing as walking. Commands resample every 2.5–6 seconds, with a 15% stop
+probability after the initial command. Ordinary observations and deployment IMU
+reads share one noisy sample per control step. Seeded reset restores nominal
+model parameters before randomization, so perturbations do not accumulate.
+
+
 ## Environments
 
 ### `SesameStand-v0`
